@@ -91,18 +91,39 @@ git clone https://github.com/komparedocers/Autonomous-Marketeer.git
 cd Autonomous-Marketeer
 ```
 
-### 2. Configure Environment
+### 2. Run Setup Script
 
-The `.env` file is already set up with sensible defaults. Review and modify if needed:
-
+**Linux/macOS:**
 ```bash
-# Key configurations in .env:
-LLM_PROVIDER=local              # or 'openai' or 'both'
-OPENAI_ENABLED=false            # Set to true and add API key for OpenAI
-LOCAL_LLM_ENABLED=true          # Local LLM is enabled by default
+./setup.sh
 ```
 
-### 3. Start the Platform
+**Windows:**
+```cmd
+setup.bat
+```
+
+This will:
+- ✅ Create `.env` file from `.env.example`
+- ✅ Display configuration summary
+- ✅ Show you next steps
+
+### 3. (Optional) Configure Environment
+
+The `.env` file is created with sensible defaults. To enable OpenAI or customize:
+
+```bash
+# Edit .env file
+nano .env  # or use your preferred editor
+
+# Key configurations:
+LLM_PROVIDER=local              # or 'openai' or 'both'
+OPENAI_ENABLED=false            # Set to true to enable OpenAI
+OPENAI_API_KEY=sk-...           # Add your OpenAI API key here
+LOCAL_LLM_ENABLED=true          # Local LLM enabled by default
+```
+
+### 4. Start the Platform
 
 ```bash
 # Start all services
@@ -121,7 +142,7 @@ This will start:
 - **Grafana**: http://localhost:3000 (admin/admin)
 - **MinIO Console**: http://localhost:9001 (minio/minio123)
 
-### 4. Access the Dashboard
+### 5. Access the Dashboard
 
 Open your browser and navigate to:
 
