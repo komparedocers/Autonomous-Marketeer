@@ -10,11 +10,11 @@ echo ""
 
 # Check if .env exists
 if [ ! -f .env ]; then
-    echo "✓ Creating .env file from .env.example..."
+    echo "[*] Creating .env file from .env.example..."
     cp .env.example .env
-    echo "  .env file created successfully!"
+    echo "    .env file created successfully!"
 else
-    echo "✓ .env file already exists"
+    echo "[*] .env file already exists"
 fi
 
 echo ""

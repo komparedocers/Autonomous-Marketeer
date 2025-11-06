@@ -95,12 +95,17 @@ cd Autonomous-Marketeer
 
 **Linux/macOS:**
 ```bash
-./setup.sh
+bash setup.sh
 ```
 
 **Windows:**
 ```cmd
 setup.bat
+```
+
+**Manual alternative (if script fails):**
+```bash
+cp .env.example .env
 ```
 
 This will:
