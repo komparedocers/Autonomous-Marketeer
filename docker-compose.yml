@@ -1,0 +1,393 @@
+version: "3.9"
+
+services:
+  # ===================
+  # Infrastructure
+  # ===================
+
+  db:
+    image: postgres:16-alpine
+    container_name: agentic-postgres
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-agentic}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-example_change_me}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./scripts/init-db.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - agentic-network
+
+  redis:
+    image: redis:7-alpine
+    container_name: agentic-redis
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - agentic-network
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8-alpine
+    container_name: agentic-clickhouse
+    ports:
+      - "${CLICKHOUSE_HTTP_PORT:-8123}:8123"
+      - "${CLICKHOUSE_NATIVE_PORT:-9000}:9000"
+    volumes:
+      - chdata:/var/lib/clickhouse
+      - ./scripts/init-clickhouse.sql:/docker-entrypoint-initdb.d/init.sql
+    environment:
+      CLICKHOUSE_DB: ${CLICKHOUSE_DB:-analytics}
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-default}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-}
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "localhost:8123/ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - agentic-network
+
+  minio:
+    image: minio/minio:latest
+    container_name: agentic-minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minio}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minio123}
+    ports:
+      - "${MINIO_PORT:-9000}:9000"
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - agentic-network
+
+  # ===================
+  # Core Services
+  # ===================
+
+  api:
+    build:
+      context: ./services/api
+      dockerfile: Dockerfile
+    container_name: agentic-api
+    env_file:
+      - .env
+    ports:
+      - "${API_PORT:-8080}:8080"
+    volumes:
+      - ./services/api:/app
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - agentic-network
+    restart: unless-stopped
+
+  llmrouter:
+    build:
+      context: ./services/llm-router
+      dockerfile: Dockerfile
+    container_name: agentic-llmrouter
+    env_file:
+      - .env
+    ports:
+      - "${LLM_ROUTER_PORT:-9090}:9090"
+    volumes:
+      - ./services/llm-router:/app
+      - model-cache:/root/.cache/huggingface
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9090/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - agentic-network
+    restart: unless-stopped
+    # Uncomment if you have GPU available
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
+
+  orchestrator:
+    build:
+      context: ./services/orchestrator
+      dockerfile: Dockerfile
+    container_name: agentic-orchestrator
+    env_file:
+      - .env
+    volumes:
+      - ./services/orchestrator:/app
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      llmrouter:
+        condition: service_healthy
+    networks:
+      - agentic-network
+    restart: unless-stopped
+
+  celery-beat:
+    build:
+      context: ./services/orchestrator
+      dockerfile: Dockerfile
+    container_name: agentic-celery-beat
+    command: celery -A app.tasks beat --loglevel=info
+    env_file:
+      - .env
+    volumes:
+      - ./services/orchestrator:/app
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - agentic-network
+    restart: unless-stopped
+
+  attribution:
+    build:
+      context: ./services/attribution
+      dockerfile: Dockerfile
+    container_name: agentic-attribution
+    env_file:
+      - .env
+    ports:
+      - "${ATTRIBUTION_PORT:-8085}:8085"
+    volumes:
+      - ./services/attribution:/app
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8085/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - agentic-network
+    restart: unless-stopped
+
+  analytics:
+    build:
+      context: ./services/analytics
+      dockerfile: Dockerfile
+    container_name: agentic-analytics
+    env_file:
+      - .env
+    ports:
+      - "${ANALYTICS_PORT:-8086}:8086"
+    volumes:
+      - ./services/analytics:/app
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8086/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - agentic-network
+    restart: unless-stopped
+
+  # ===================
+  # Channel Connectors
+  # ===================
+
+  connector-googleads:
+    build:
+      context: ./services/connectors/googleads
+      dockerfile: Dockerfile
+    container_name: agentic-connector-googleads
+    env_file:
+      - .env
+    volumes:
+      - ./services/connectors/googleads:/app
+    depends_on:
+      redis:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+    networks:
+      - agentic-network
+    restart: unless-stopped
+    profiles:
+      - connectors
+
+  connector-meta:
+    build:
+      context: ./services/connectors/meta
+      dockerfile: Dockerfile
+    container_name: agentic-connector-meta
+    env_file:
+      - .env
+    volumes:
+      - ./services/connectors/meta:/app
+    depends_on:
+      redis:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+    networks:
+      - agentic-network
+    restart: unless-stopped
+    profiles:
+      - connectors
+
+  connector-linkedin:
+    build:
+      context: ./services/connectors/linkedin
+      dockerfile: Dockerfile
+    container_name: agentic-connector-linkedin
+    env_file:
+      - .env
+    volumes:
+      - ./services/connectors/linkedin:/app
+    depends_on:
+      redis:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+    networks:
+      - agentic-network
+    restart: unless-stopped
+    profiles:
+      - connectors
+
+  connector-tiktok:
+    build:
+      context: ./services/connectors/tiktok
+      dockerfile: Dockerfile
+    container_name: agentic-connector-tiktok
+    env_file:
+      - .env
+    volumes:
+      - ./services/connectors/tiktok:/app
+    depends_on:
+      redis:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+    networks:
+      - agentic-network
+    restart: unless-stopped
+    profiles:
+      - connectors
+
+  # ===================
+  # Frontend
+  # ===================
+
+  webapp:
+    build:
+      context: ./webapp
+      dockerfile: Dockerfile
+    container_name: agentic-webapp
+    env_file:
+      - .env
+    environment:
+      - VITE_API_URL=${VITE_API_URL:-http://localhost:8080}
+    ports:
+      - "${WEBAPP_PORT:-5173}:5173"
+    volumes:
+      - ./webapp:/app
+      - /app/node_modules
+    depends_on:
+      api:
+        condition: service_healthy
+    networks:
+      - agentic-network
+    restart: unless-stopped
+
+  # ===================
+  # Monitoring
+  # ===================
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: agentic-prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+    ports:
+      - "${PROMETHEUS_PORT:-9091}:9090"
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus-data:/prometheus
+    networks:
+      - agentic-network
+    restart: unless-stopped
+    profiles:
+      - monitoring
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: agentic-grafana
+    environment:
+      - GF_SECURITY_ADMIN_USER=${GRAFANA_ADMIN_USER:-admin}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-admin}
+      - GF_USERS_ALLOW_SIGN_UP=false
+    ports:
+      - "${GRAFANA_PORT:-3000}:3000"
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      - prometheus
+    networks:
+      - agentic-network
+    restart: unless-stopped
+    profiles:
+      - monitoring
+
+networks:
+  agentic-network:
+    driver: bridge
+
+volumes:
+  pgdata:
+  redis-data:
+  chdata:
+  minio-data:
+  model-cache:
+  prometheus-data:
+  grafana-data:
