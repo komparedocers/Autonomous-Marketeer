@@ -4,17 +4,15 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from app.core.config import get_settings
 from app.core.database import Base, engine
+from app.core.logging_config import setup_logging, get_logger
+from app.core.middleware import LoggingMiddleware, ErrorLoggingMiddleware
 from app.routers import auth, campaigns, agents
-import logging
-
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-)
-logger = logging.getLogger(__name__)
 
 settings = get_settings()
+
+# Setup structured logging
+setup_logging(settings.LOG_LEVEL)
+logger = get_logger(__name__)
 
 # Create FastAPI app
 app = FastAPI(
@@ -24,6 +22,10 @@ app = FastAPI(
     redoc_url="/redoc" if settings.DEBUG else None,
 )
 
+# Add logging middleware (BEFORE CORS)
+app.add_middleware(ErrorLoggingMiddleware)
+app.add_middleware(LoggingMiddleware)
+
 # CORS middleware
 app.add_middleware(
     CORSMiddleware,
@@ -31,6 +33,7 @@ app.add_middleware(
     allow_credentials=settings.CORS_ALLOW_CREDENTIALS,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["X-Request-ID"],
 )
 
 
@@ -38,10 +41,26 @@ app.add_middleware(
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
     """Global exception handler."""
-    logger.error(f"Unhandled exception: {exc}", exc_info=True)
+    request_id = getattr(request.state, "request_id", "unknown")
+
+    logger.error(
+        f"Unhandled exception: {type(exc).__name__}",
+        extra={
+            "request_id": request_id,
+            "error_type": type(exc).__name__,
+            "error_message": str(exc),
+            "url": str(request.url),
+            "method": request.method,
+        },
+        exc_info=True,
+    )
+
     return JSONResponse(
         status_code=500,
-        content={"detail": "Internal server error"},
+        content={
+            "detail": "Internal server error",
+            "request_id": request_id,
+        },
     )
 
 

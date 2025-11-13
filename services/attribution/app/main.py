@@ -9,8 +9,11 @@ import json
 import logging
 import os
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
+# Configure logging with more detail
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s - %(pathname)s:%(lineno)d'
+)
 logger = logging.getLogger(__name__)
 
 # Get environment variables
@@ -97,8 +100,19 @@ async def health_check():
 
 
 @app.post("/collect")
-async def collect_event(event: Event, bg: BackgroundTasks):
+async def collect_event(event: Event, request: Request, bg: BackgroundTasks):
     """Collect tracking event."""
+    logger.info(
+        f"Event collection request",
+        extra={
+            "event_type": event.event,
+            "session_id": event.sid,
+            "tenant_id": event.tenant_id,
+            "has_utm": bool(event.utm_source or event.utm_medium or event.utm_campaign),
+            "client_ip": request.client.host if request.client else None,
+        }
+    )
+
     # Set timestamp if not provided
     if not event.ts:
         event.ts = datetime.utcnow().isoformat()
@@ -106,13 +120,17 @@ async def collect_event(event: Event, bg: BackgroundTasks):
     # Write event to ClickHouse in background
     bg.add_task(write_event, event)
 
+    logger.debug(f"Event queued for background processing: {event.event}")
     return {"ok": True, "event": event.event}
 
 
 def write_event(event: Event):
     """Write event to ClickHouse."""
     if not ch_client:
-        logger.error("ClickHouse client not initialized")
+        logger.error("ClickHouse client not initialized - event will be lost", extra={
+            "event": event.event,
+            "session_id": event.sid,
+        })
         return
 
     try:
@@ -138,7 +156,16 @@ def write_event(event: Event):
                 "revenue", "properties"
             ],
         )
-        logger.info(f"Event written: {event.event} for session {event.sid}")
+        logger.info(
+            f"Event written to ClickHouse",
+            extra={
+                "event_type": event.event,
+                "session_id": event.sid,
+                "tenant_id": event.tenant_id,
+                "utm_campaign": event.utm_campaign,
+                "revenue": event.value,
+            }
+        )
     except Exception as e:
         logger.error(f"Failed to write event: {e}")
 

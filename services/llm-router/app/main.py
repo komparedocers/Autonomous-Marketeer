@@ -115,8 +115,23 @@ async def health_check():
 @app.post("/generate")
 async def generate(request: GenerateRequest):
     """Generate text using LLM."""
+    import time
+    start_time = time.time()
+
     # Determine provider
     provider_name = request.provider or settings.LLM_DEFAULT_PROVIDER
+
+    logger.info(
+        f"LLM generation request",
+        extra={
+            "provider": provider_name,
+            "prompt_length": len(request.prompt),
+            "has_system_prompt": request.system_prompt is not None,
+            "max_tokens": request.max_tokens,
+            "temperature": request.temperature,
+            "use_cache": request.use_cache,
+        },
+    )
 
     # Check cache if enabled
     if request.use_cache and settings.LLM_CACHE_ENABLED and redis_client:
@@ -132,17 +147,18 @@ async def generate(request: GenerateRequest):
         try:
             cached_response = redis_client.get(cache_key)
             if cached_response:
-                logger.info("Cache hit for request")
+                logger.info("Cache hit - returning cached response")
                 response = json.loads(cached_response)
                 response["cached"] = True
                 return response
         except Exception as e:
-            logger.warning(f"Cache lookup failed: {e}")
+            logger.warning(f"Cache lookup failed: {e}", exc_info=True)
 
     # Get provider
     provider = None
     if provider_name == "openai":
         if not openai_provider:
+            logger.error("OpenAI provider requested but not available")
             raise HTTPException(
                 status_code=503,
                 detail="OpenAI provider not available"
@@ -150,12 +166,14 @@ async def generate(request: GenerateRequest):
         provider = openai_provider
     elif provider_name == "local":
         if not local_provider:
+            logger.error("Local LLM provider requested but not available")
             raise HTTPException(
                 status_code=503,
                 detail="Local LLM provider not available"
             )
         provider = local_provider
     else:
+        logger.error(f"Invalid provider requested: {provider_name}")
         raise HTTPException(
             status_code=400,
             detail=f"Invalid provider: {provider_name}"
@@ -163,22 +181,47 @@ async def generate(request: GenerateRequest):
 
     # Moderate content if enabled
     if settings.LLM_MODERATION_ENABLED:
+        logger.debug("Running content moderation")
         moderation = await provider.moderate(request.prompt)
         if moderation.get("flagged"):
+            logger.warning("Content flagged by moderation", extra={"moderation": moderation})
             raise HTTPException(
                 status_code=400,
                 detail="Content flagged by moderation"
             )
 
     # Generate response
-    response = await provider.generate(
-        prompt=request.prompt,
-        system_prompt=request.system_prompt,
-        max_tokens=request.max_tokens,
-        temperature=request.temperature,
-    )
+    logger.info(f"Generating response with {provider_name}")
+    try:
+        response = await provider.generate(
+            prompt=request.prompt,
+            system_prompt=request.system_prompt,
+            max_tokens=request.max_tokens,
+            temperature=request.temperature,
+        )
+    except Exception as e:
+        duration_ms = (time.time() - start_time) * 1000
+        logger.error(
+            f"LLM generation failed: {str(e)}",
+            extra={
+                "provider": provider_name,
+                "error": str(e),
+                "duration_ms": round(duration_ms, 2),
+            },
+            exc_info=True,
+        )
+        raise
 
     if not response.get("success"):
+        duration_ms = (time.time() - start_time) * 1000
+        logger.error(
+            f"LLM generation unsuccessful",
+            extra={
+                "provider": provider_name,
+                "error": response.get("error"),
+                "duration_ms": round(duration_ms, 2),
+            },
+        )
         raise HTTPException(
             status_code=500,
             detail=response.get("error", "Generation failed")
@@ -201,8 +244,19 @@ async def generate(request: GenerateRequest):
                 settings.LLM_CACHE_TTL,
                 json.dumps(response),
             )
+            logger.debug("Response cached successfully")
         except Exception as e:
-            logger.warning(f"Cache write failed: {e}")
+            logger.warning(f"Cache write failed: {e}", exc_info=True)
+
+    duration_ms = (time.time() - start_time) * 1000
+    logger.info(
+        f"LLM generation completed successfully",
+        extra={
+            "provider": provider_name,
+            "tokens_used": response.get("tokens_used", 0),
+            "duration_ms": round(duration_ms, 2),
+        },
+    )
 
     response["cached"] = False
     return response
